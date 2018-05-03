@@ -12,11 +12,12 @@ import signal
 import json
 from collections import defaultdict
 from time import time
+from multiprocessing import Process
 
 class OutOfLeasesError(Exception):
     pass
 
-class DHCPD:
+class DHCPD(Process):
     '''
         This class implements a DHCP Server, limited to PXE options.
         Implemented from RFC2131, RFC2132,
@@ -25,6 +26,8 @@ class DHCPD:
     '''
     def __init__(self, **server_settings):
 
+        Process.__init__(self, name="DHCP_Srver")
+        self._run = False
         self.ip = server_settings.get('ip', '192.168.2.2')
         self.port = int(server_settings.get('port', 67))
         self.offer_from = server_settings.get('offer_from', '192.168.2.100')
@@ -44,6 +47,8 @@ class DHCPD:
 
         self.file_server = server_settings.get('file_server', '192.168.2.2')
         self.file_name = server_settings.get('file_name', '')
+        self.file_option_name = server_settings.get("file_option_name", {"pxe": "undionly.kpxe",
+                                                                         "ipxe": "ipxelinux.0"})
         if not self.file_name:
             self.force_file_name = False
             self.file_name = 'pxelinux.0'
@@ -51,22 +56,34 @@ class DHCPD:
             self.force_file_name = True
         self.ipxe = server_settings.get('use_ipxe', False)
         self.http = server_settings.get('use_http', False)
-        self.mode_proxy = server_settings.get('mode_proxy', False) # ProxyDHCP mode
+        self.mode_proxy = server_settings.get('mode_proxy', False)  # ProxyDHCP mode
         self.static_config = server_settings.get('static_config', dict())
         self.whitelist = server_settings.get('whitelist', False)
-        self.mode_verbose = server_settings.get('mode_verbose', False) # debug mode
-        self.mode_debug = server_settings.get('mode_debug', False) # debug mode
-        self.logger = server_settings.get('logger', None)
+        self.mode_verbose = server_settings.get('mode_verbose', False)  # debug mode
+        self.mode_debug = server_settings.get('mode_debug', False)  # debug mode
+        self.log_file = server_settings.get('log_file', None)
         self.save_leases_file = server_settings.get('saveleases', '')
-        self.magic = struct.pack('!I', 0x63825363) # magic cookie
 
+        self.magic = struct.pack('!I', 0x63825363)  # magic cookie
+        self.options = dict()
+        # self.leases = defaultdict()
+        # self.logger = logging.getLogger('DHCP')
+        # self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    def before_listen(self):
         # setup logger
-        if self.logger == None:
-            self.logger = logging.getLogger('DHCP')
+        self.leases = defaultdict(lambda: {'ip': '', 'expire': 0, 'ipxe': self.ipxe})
+        self.logger = logging.getLogger('DHCP')
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+        if self.log_file is None:
             handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+        else:
+            handler = logging.FileHandler(self.log_file)
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s \t %(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
+
         if self.mode_debug:
             self.logger.setLevel(logging.DEBUG)
         elif self.mode_verbose:
@@ -103,15 +120,12 @@ class DHCPD:
         self.logger.info('Using iPXE: {0}'.format(self.ipxe))
         self.logger.info('Using HTTP Server: {0}'.format(self.http))
 
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(('', self.port ))
+        self.sock.bind(('', self.port))
 
         # key is MAC
         # separate options dict so we don't have to clean up on export
-        self.options = dict()
-        self.leases = defaultdict(lambda: {'ip': '', 'expire': 0, 'ipxe': self.ipxe})
         if self.save_leases_file:
             try:
                 leases_file = open(self.save_leases_file, 'rb')
@@ -125,12 +139,13 @@ class DHCPD:
             except IOError, ValueError:
                 pass
 
-        signal.signal(signal.SIGINT, self.export_leases)
+        # signal.signal(signal.SIGINT, self.export_leases)
         signal.signal(signal.SIGTERM, self.export_leases)
-        signal.signal(signal.SIGALRM, self.export_leases)
-        signal.signal(signal.SIGHUP, self.export_leases)
+        # signal.signal(signal.SIGALRM, self.export_leases)
+        # signal.signal(signal.SIGHUP, self.export_leases)
+        self._run = True
 
-    def export_leases(self, signum, frame):
+    def save_leases(self):
         if self.save_leases_file:
             export_safe = dict()
             for lease in self.leases:
@@ -140,11 +155,14 @@ class DHCPD:
             json.dump(export_safe, leases_file)
             self.logger.info('Exported leases to {0}'.format(self.save_leases_file))
 
+    def export_leases(self, signum, frame):
+        self.save_leases()
         # if keyboard interrupt, propagate upwards
+        self._run = False
         if signum == signal.SIGINT:
             raise KeyboardInterrupt
 
-    def get_namespaced_static(self, path, fallback = {}):
+    def get_namespaced_static(self, path, fallback={}):
         statics = self.static_config
         for child in path.split('.'):
             statics = statics.get(child, {})
@@ -343,30 +361,35 @@ class DHCPD:
 
     def listen(self):
         '''Main listen loop.'''
-        while True:
-            message, address = self.sock.recvfrom(1024)
-            [client_mac] = struct.unpack('!28x6s', message[:34])
-            self.logger.debug('Received message')
-            self.logger.debug('<--BEGIN MESSAGE-->')
-            self.logger.debug('{0}'.format(repr(message)))
-            self.logger.debug('<--END MESSAGE-->')
-            self.options[client_mac] = self.tlv_parse(message[240:])
-            self.logger.debug('Parsed received options')
-            self.logger.debug('<--BEGIN OPTIONS-->')
-            self.logger.debug('{0}'.format(repr(self.options[client_mac])))
-            self.logger.debug('<--END OPTIONS-->')
-            if not self.validate_req(client_mac):
-                continue
-            type = ord(self.options[client_mac][53][0]) # see RFC2131, page 10
-            if type == 1:
-                self.logger.debug('Sending DHCPOFFER to {0}'.format(self.get_mac(client_mac)))
-                try:
-                    self.dhcp_offer(message)
-                except OutOfLeasesError:
-                    self.logger.critical('Ran out of leases')
-            elif type == 3 and address[0] == '0.0.0.0' and not self.mode_proxy:
-                self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
-                self.dhcp_ack(message)
-            elif type == 3 and address[0] != '0.0.0.0' and self.mode_proxy:
-                self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
-                self.dhcp_ack(message)
+        message, address = self.sock.recvfrom(1024)
+        [client_mac] = struct.unpack('!28x6s', message[:34])
+        self.logger.debug('Received message')
+        self.logger.debug('<--BEGIN MESSAGE-->')
+        self.logger.debug('{0}'.format(repr(message)))
+        self.logger.debug('<--END MESSAGE-->')
+        self.options[client_mac] = self.tlv_parse(message[240:])
+        self.logger.debug('Parsed received options')
+        self.logger.debug('<--BEGIN OPTIONS-->')
+        self.logger.debug('{0}'.format(repr(self.options[client_mac])))
+        self.logger.debug('<--END OPTIONS-->')
+        if not self.validate_req(client_mac):
+            return
+        type = ord(self.options[client_mac][53][0]) # see RFC2131, page 10
+        if type == 1:
+            self.logger.debug('Sending DHCPOFFER to {0}'.format(self.get_mac(client_mac)))
+            try:
+                self.dhcp_offer(message)
+            except OutOfLeasesError:
+                self.logger.critical('Ran out of leases')
+        elif type == 3 and address[0] == '0.0.0.0' and not self.mode_proxy:
+            self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
+            self.dhcp_ack(message)
+        elif type == 3 and address[0] != '0.0.0.0' and self.mode_proxy:
+            self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
+            self.dhcp_ack(message)
+
+    def run(self):
+        self.before_listen()
+
+        while self._run:
+            self.listen()
