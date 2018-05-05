@@ -6,16 +6,25 @@ This file contains classes and functions that implement the PyPXE DHCP service
 
 import socket
 import struct
-import os
 import logging
 import signal
 import json
 from collections import defaultdict
 from time import time
-from multiprocessing import Process
+from multiprocessing import Process, Value, Array
+import sys
+import platform
+
+
+# g_dhcp_leases = Array('b', 1024 * 1024 * [0]) if "Window" in platform.system() else None
+# g_win_exit_flag_dhcp = Value('B', False) if "Window" in platform.system() else None
 
 class OutOfLeasesError(Exception):
     pass
+
+
+def default_dict():
+    return {'ip': '', 'expire': 0, 'ipxe': False}
 
 class DHCPD(Process):
     '''
@@ -25,9 +34,7 @@ class DHCPD(Process):
         and http://www.pix.net/software/pxeboot/archive/pxespec.pdf.
     '''
     def __init__(self, **server_settings):
-
-        Process.__init__(self, name="DHCP_Srver")
-        self._run = False
+        super(DHCPD, self).__init__(name='dhcp_server')
         self.ip = server_settings.get('ip', '192.168.2.2')
         self.port = int(server_settings.get('port', 67))
         self.offer_from = server_settings.get('offer_from', '192.168.2.100')
@@ -66,15 +73,23 @@ class DHCPD(Process):
 
         self.magic = struct.pack('!I', 0x63825363)  # magic cookie
         self.options = dict()
-        # self.leases = defaultdict()
-        # self.logger = logging.getLogger('DHCP')
+        self.leases = defaultdict(default_dict)
+        self.logger = logging.getLogger()
         # self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        signal.signal(signal.SIGTERM, self.export_leases)
+        self.exit_flag = server_settings.get("win_exit_flag", None)
+        self.leases_out = server_settings.get("leases_out", None)
 
     def before_listen(self):
         # setup logger
-        self.leases = defaultdict(lambda: {'ip': '', 'expire': 0, 'ipxe': self.ipxe})
+
         self.logger = logging.getLogger('DHCP')
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sock.bind(('', self.port))
+        if "Windows" in platform.system():
+            self.sock.settimeout(1)
 
         if self.log_file is None:
             handler = logging.StreamHandler()
@@ -120,10 +135,6 @@ class DHCPD(Process):
         self.logger.info('Using iPXE: {0}'.format(self.ipxe))
         self.logger.info('Using HTTP Server: {0}'.format(self.http))
 
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(('', self.port))
-
         # key is MAC
         # separate options dict so we don't have to clean up on export
         if self.save_leases_file:
@@ -139,13 +150,7 @@ class DHCPD(Process):
             except IOError, ValueError:
                 pass
 
-        # signal.signal(signal.SIGINT, self.export_leases)
-        signal.signal(signal.SIGTERM, self.export_leases)
-        # signal.signal(signal.SIGALRM, self.export_leases)
-        # signal.signal(signal.SIGHUP, self.export_leases)
-        self._run = True
-
-    def save_leases(self):
+    def export_leases(self, signum=None, frame=None):
         if self.save_leases_file:
             export_safe = dict()
             for lease in self.leases:
@@ -154,13 +159,10 @@ class DHCPD(Process):
             leases_file = open(self.save_leases_file, 'wb')
             json.dump(export_safe, leases_file)
             self.logger.info('Exported leases to {0}'.format(self.save_leases_file))
-
-    def export_leases(self, signum, frame):
-        self.save_leases()
         # if keyboard interrupt, propagate upwards
-        self._run = False
-        if signum == signal.SIGINT:
-            raise KeyboardInterrupt
+        if signum is not None:
+            if signum == signal.SIGTERM:
+                sys.exit()
 
     def get_namespaced_static(self, path, fallback={}):
         statics = self.static_config
@@ -247,6 +249,9 @@ class DHCPD(Process):
                 offer = offer if offer else self.next_ip()
                 self.leases[client_mac]['ip'] = offer
                 self.leases[client_mac]['expire'] = time() + 86400
+
+                # save leases
+
                 self.logger.info('New Assignment - MAC: {0} -> IP: {1}'.format(self.get_mac(client_mac), self.leases[client_mac]['ip']))
             response += socket.inet_aton(offer) # yiaddr
         else:
@@ -361,35 +366,51 @@ class DHCPD(Process):
 
     def listen(self):
         '''Main listen loop.'''
-        message, address = self.sock.recvfrom(1024)
-        [client_mac] = struct.unpack('!28x6s', message[:34])
-        self.logger.debug('Received message')
-        self.logger.debug('<--BEGIN MESSAGE-->')
-        self.logger.debug('{0}'.format(repr(message)))
-        self.logger.debug('<--END MESSAGE-->')
-        self.options[client_mac] = self.tlv_parse(message[240:])
-        self.logger.debug('Parsed received options')
-        self.logger.debug('<--BEGIN OPTIONS-->')
-        self.logger.debug('{0}'.format(repr(self.options[client_mac])))
-        self.logger.debug('<--END OPTIONS-->')
-        if not self.validate_req(client_mac):
-            return
-        type = ord(self.options[client_mac][53][0]) # see RFC2131, page 10
-        if type == 1:
-            self.logger.debug('Sending DHCPOFFER to {0}'.format(self.get_mac(client_mac)))
-            try:
-                self.dhcp_offer(message)
-            except OutOfLeasesError:
-                self.logger.critical('Ran out of leases')
-        elif type == 3 and address[0] == '0.0.0.0' and not self.mode_proxy:
-            self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
-            self.dhcp_ack(message)
-        elif type == 3 and address[0] != '0.0.0.0' and self.mode_proxy:
-            self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
-            self.dhcp_ack(message)
-
+        try:
+            message, address = self.sock.recvfrom(1024)
+            [client_mac] = struct.unpack('!28x6s', message[:34])
+            self.logger.debug('Received message')
+            self.logger.debug('<--BEGIN MESSAGE-->')
+            self.logger.debug('{0}'.format(repr(message)))
+            self.logger.debug('<--END MESSAGE-->')
+            self.options[client_mac] = self.tlv_parse(message[240:])
+            self.logger.debug('Parsed received options')
+            self.logger.debug('<--BEGIN OPTIONS-->')
+            self.logger.debug('{0}'.format(repr(self.options[client_mac])))
+            self.logger.debug('<--END OPTIONS-->')
+            if not self.validate_req(client_mac):
+                return
+            type = ord(self.options[client_mac][53][0]) # see RFC2131, page 10
+            if type == 1:
+                self.logger.debug('Sending DHCPOFFER to {0}'.format(self.get_mac(client_mac)))
+                try:
+                    self.dhcp_offer(message)
+                except OutOfLeasesError:
+                    self.logger.critical('Ran out of leases')
+            elif type == 3 and address[0] == '0.0.0.0' and not self.mode_proxy:
+                self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
+                self.dhcp_ack(message)
+            elif type == 3 and address[0] != '0.0.0.0' and self.mode_proxy:
+                self.logger.debug('Sending DHCPACK to {0}'.format(self.get_mac(client_mac)))
+                self.dhcp_ack(message)
+        except socket.error:
+            pass
     def run(self):
         self.before_listen()
 
-        while self._run:
+        while True:
             self.listen()
+            if self.exit_flag:
+                if self.exit_flag.value:
+                    self.export_leases()
+                    sys.exit()
+
+
+if __name__ == "__main__":
+    exit_flag = Value('B', False)
+    server = DHCPD(win_exit_flag=exit_flag)
+    server.start()
+    import time
+    time.sleep(1)
+    exit_flag.value = True
+    time.sleep(3)

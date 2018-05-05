@@ -13,23 +13,34 @@ import traceback
 # import helpers
 import os
 from time import sleep
-import multiprocessing
+# from dhcp import g_dhcp_leases, g_win_exit_flag_dhcp
+import platform
+from multiprocessing import Process, Value, Array
 
-g_dhcp_leases = multiprocessing.RawValue('B', 1024 * 1024)
+
+g_dhcp_leases = Array('b', 1024 * 1024 * [0]) if "Window" in platform.system() else None
+g_win_exit_flag_dhcp = Value('B', False) if "Window" in platform.system() else None
+
 
 def do_debug_verbose(cfg, service):
     return ((service.lower() in cfg.lower()
             or 'all' in cfg.lower())
             and '-{0}'.format(service.lower()) not in cfg.lower())
 
+def get_sys_type():
+    if "Windows" in platform.system():
+        return "windows"
+    elif "Linux" in platform.system():
+        return "linux"
+    else:
+        return "other"
+
 
 class IPXEServer(object):
+
     def __init__(self, **server_cfg):
 
-        self.tftp_server = None
-        self.dhcp_server = None
-        self.http_server = None
-
+        self.servers = []
         # get cfg
         self.sys_cfg = server_cfg.get("sys_cfg", None)
         self.tftp_cfg = server_cfg.get("tft_cfg", None)
@@ -94,7 +105,7 @@ class IPXEServer(object):
         #         self.tftp_process = Process(target=self.tftp_server)
         #         self.tftp_process.daemon = True
         #         self.tftp_process.start()
-        #         self.tftp_logger.info("tftp server isAlive:{0}".format(self.tftp_server.isAlive()))
+        #         self.servers.append(self.tftp_server)
         #     except:
         #         self.tft_server = None
         #         traceback.print_exc()
@@ -124,7 +135,9 @@ class IPXEServer(object):
                                               whitelist=False,
                                               log_file=self.dhcp_cfg.get("log_file", None),
                                               saveleases=self.dhcp_cfg.get("leases_file", None),
-                                              )
+                                              win_exit_flag=g_win_exit_flag_dhcp,
+                                              leases_out=g_dhcp_leases)
+                self.servers.append(self.dhcp_server)
             except :
                 traceback.print_exc()
 
@@ -141,24 +154,43 @@ class IPXEServer(object):
         #         traceback.print_exc()
 
         # nbd
+        # signal.signal(signal.SIGCHLD, self.read_leases)
 
     def start(self):
-        if self.tftp_server:
-            self.tftp_server.start()
-        if self.dhcp_server:
-            self.dhcp_server.start()
+        for server in self.servers:
+            server.start()
 
     def stop(self):
-        if self.tftp_server:
-            self.tftp_server.terminal()
-        if self.dhcp_server:
-            self.dhcp_server.terminate()
-            sleep(1)
-            print self.dhcp_server
+        import platform
+        if "Windows" in platform.system():
+            # windows
+            for server in self.servers:
+                #signal包主要是针对UNIX平台(比如Linux, MAC
+                # OS)，而Windows内核中由于对信号机制的支持不充分，所以在Windows上的Python不能发挥信号系统的功能。
+                # os.popen("taskkill /pid {}".format(server.pid))
+                global g_win_exit_flag_dhcp
+                g_win_exit_flag_dhcp.value = True
+
+        elif "Linux" in platform.system():
+            for server in self.servers:
+                server.terminate()
+                os.kill(server.pid, signal.SIGTERM)
+        else:
+            for server in self.servers:
+                server.terminate()
+                server.jion()
+
+        sleep(2)
+
+        for server in self.servers:
+            self.sys_logger.info("{0} stop {1}".format(server.name, "Success" if not server.is_alive() else "Fail"))
 
     def get_dhcp_lease(self):
         if self.dhcp_server:
             pass
+
+    def read_leases(self):
+        print "test"
 
 
 # test
@@ -170,8 +202,8 @@ if __name__ == "__main__":
             # "syslog_file": "ipxe.log",
 
             # debug
-            "mode_debug": "all",
-            "mode_verbose": "",
+            "mode_debug": "",
+            "mode_verbose": "all",
 
             # server enable
             "tftp_enable": False,
@@ -220,8 +252,8 @@ if __name__ == "__main__":
     import signal
     ipxe_server = IPXEServer(**ipx_cfg)
     ipxe_server.start()
-    # sleep(2)
-    # ipxe_server.stop()
+    sleep(20)
+    ipxe_server.stop()
     while True:
         pass
 
