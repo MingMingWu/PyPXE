@@ -148,6 +148,10 @@ class DHCPD(Process):
                     import_safe[packed_mac] = imported[lease]
                 self.leases.update(import_safe)
                 self.logger.info('Loaded leases from {0}'.format(self.save_leases_file))
+                for lease in self.leases:
+                    self.output_leases(mac=self.get_mac(lease),
+                                       ip=self.leases[lease]['ip'],
+                                       expire=self.leases[lease]['expire'])
             except IOError, ValueError:
                 pass
 

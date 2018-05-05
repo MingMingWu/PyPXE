@@ -25,12 +25,14 @@ g_win_exit_flag_dhcp = Value('B', False) if "Window" in platform.system() else N
 def read_leases():
     leases = []
     global g_dhcp_leases
-    le_str = g_dhcp_leases[::].strip('\n').split('\n')
-    print "le_str", le_str
-    for le in le_str:
-        # print eval(le)
-        leases.append(eval(le))
-    return leases
+    if g_dhcp_leases[0] != '\n':
+        le_str = g_dhcp_leases[::].strip('\n').split('\n')
+        for le in le_str:
+            # print eval(le)
+            leases.append(eval(le))
+        return leases
+    else:
+        return None
 
 
 def do_debug_verbose(cfg, service):
