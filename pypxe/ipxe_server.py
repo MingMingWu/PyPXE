@@ -207,9 +207,21 @@ class IPXEServer(object):
     def read_leases(self):
         print "test"
 
-
+#获取网卡名称和其ip地址，不包括回环
+# TODO: 网卡名称转换问题
+def get_netcard():
+    import psutil
+    netcard_info = []
+    info = psutil.net_if_addrs()
+    for k,v in info.items():
+        for item in v:
+            if item[0] == 2 and not item[1]=='127.0.0.1':
+                netcard_info.append((k,item[1]))
+    return netcard_info
 # test
 if __name__ == "__main__":
+
+    print get_netcard()
 
     ipx_cfg = {
         "sys_cfg": {
@@ -270,6 +282,7 @@ if __name__ == "__main__":
     sleep(20)
     ipxe_server.stop()
     print read_leases()
+
 
 
 
