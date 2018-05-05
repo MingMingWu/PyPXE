@@ -78,7 +78,8 @@ class DHCPD(Process):
         # self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         signal.signal(signal.SIGTERM, self.export_leases)
         self.exit_flag = server_settings.get("win_exit_flag", None)
-        self.leases_out = server_settings.get("leases_out", None)
+        self.leases_output_buffer = server_settings.get("leases_out", None)
+        self.buffer_position = 0
 
     def before_listen(self):
         # setup logger
@@ -163,6 +164,15 @@ class DHCPD(Process):
         if signum is not None:
             if signum == signal.SIGTERM:
                 sys.exit()
+
+    def output_leases(self, mac=None, ip=None, expire=None):
+        if self.leases_output_buffer:
+            lease = str({'mac': mac, 'ip': ip, 'expire': expire})
+            self.logger.info("leases:{}".format(lease))
+            for value in lease:
+                self.leases_output_buffer[self.buffer_position] = value
+                self.buffer_position += 1
+            self.buffer_position += 1
 
     def get_namespaced_static(self, path, fallback={}):
         statics = self.static_config
@@ -251,7 +261,9 @@ class DHCPD(Process):
                 self.leases[client_mac]['expire'] = time() + 86400
 
                 # save leases
-
+                self.output_leases(mac=self.get_mac(client_mac),
+                                   ip=self.leases[client_mac]['ip'],
+                                   expire=self.leases[client_mac]['expire'])
                 self.logger.info('New Assignment - MAC: {0} -> IP: {1}'.format(self.get_mac(client_mac), self.leases[client_mac]['ip']))
             response += socket.inet_aton(offer) # yiaddr
         else:

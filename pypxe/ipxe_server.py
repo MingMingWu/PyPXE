@@ -18,14 +18,26 @@ import platform
 from multiprocessing import Process, Value, Array
 
 
-g_dhcp_leases = Array('b', 1024 * 1024 * [0]) if "Window" in platform.system() else None
+g_dhcp_leases = Array('c', 1024 * 1024 * ['\n']) if "Window" in platform.system() else None
 g_win_exit_flag_dhcp = Value('B', False) if "Window" in platform.system() else None
+
+
+def read_leases():
+    leases = []
+    global g_dhcp_leases
+    le_str = g_dhcp_leases[::].strip('\n').split('\n')
+    print "le_str", le_str
+    for le in le_str:
+        # print eval(le)
+        leases.append(eval(le))
+    return leases
 
 
 def do_debug_verbose(cfg, service):
     return ((service.lower() in cfg.lower()
             or 'all' in cfg.lower())
             and '-{0}'.format(service.lower()) not in cfg.lower())
+
 
 def get_sys_type():
     if "Windows" in platform.system():
@@ -174,6 +186,7 @@ class IPXEServer(object):
         elif "Linux" in platform.system():
             for server in self.servers:
                 server.terminate()
+                sleep(0.5)
                 os.kill(server.pid, signal.SIGTERM)
         else:
             for server in self.servers:
@@ -253,9 +266,9 @@ if __name__ == "__main__":
     ipxe_server = IPXEServer(**ipx_cfg)
     ipxe_server.start()
     sleep(20)
+    print read_leases()
     ipxe_server.stop()
-    while True:
-        pass
+
 
 
 
