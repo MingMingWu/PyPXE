@@ -1,3 +1,4 @@
+# encoding: utf-8
 '''
 
 This file contains classes and functions that implement the PyPXE DHCP service
@@ -143,15 +144,17 @@ class DHCPD(Process):
                 leases_file = open(self.save_leases_file, 'rb')
                 imported = json.load(leases_file)
                 import_safe = dict()
+                self.logger.info('Loaded leases from {0}'.format(self.save_leases_file))
                 for lease in imported:
                     packed_mac = struct.pack('BBBBBB', *map(lambda x:int(x, 16), lease.split(':')))
                     import_safe[packed_mac] = imported[lease]
+                    self.output_leases(mac=lease,
+                                       ip=imported[lease]['ip'],
+                                       expire=imported[lease]['expire'])
+                    self.logger.info("load lease: mac:{0} ip:{1}, expire:{2}".format(lease,
+                                                                                     imported[lease]['ip'],
+                                                                                     imported[lease]['expire']))
                 self.leases.update(import_safe)
-                self.logger.info('Loaded leases from {0}'.format(self.save_leases_file))
-                for lease in self.leases:
-                    self.output_leases(mac=self.get_mac(lease),
-                                       ip=self.leases[lease]['ip'],
-                                       expire=self.leases[lease]['expire'])
             except IOError, ValueError:
                 pass
 
@@ -172,7 +175,6 @@ class DHCPD(Process):
     def output_leases(self, mac=None, ip=None, expire=None):
         if self.leases_output_buffer:
             lease = str({'mac': mac, 'ip': ip, 'expire': expire})
-            self.logger.info("leases:{}".format(lease))
             for value in lease:
                 self.leases_output_buffer[self.buffer_position] = value
                 self.buffer_position += 1
@@ -312,6 +314,7 @@ class DHCPD(Process):
         # file_name null terminated
         filename = self.get_namespaced_static('dhcp.binding.{0}.rom'.format(self.get_mac(client_mac)))
         if not filename:
+            # TODO: 支持文件可通过接口配置
             if not self.ipxe or not self.leases[client_mac]['ipxe']:
                 # http://www.syslinux.org/wiki/index.php/PXELINUX#UEFI
                 if 'options' in self.leases[client_mac] and 93 in self.leases[client_mac]['options'] and not self.force_file_name:

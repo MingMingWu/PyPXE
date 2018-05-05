@@ -268,8 +268,8 @@ if __name__ == "__main__":
     ipxe_server = IPXEServer(**ipx_cfg)
     ipxe_server.start()
     sleep(20)
-    print read_leases()
     ipxe_server.stop()
+    print read_leases()
 
 
 
