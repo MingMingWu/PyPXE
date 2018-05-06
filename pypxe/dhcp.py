@@ -14,7 +14,7 @@ from collections import defaultdict
 from time import time
 from multiprocessing import Process, Value, Array
 import sys
-import platform
+import helpers
 
 
 # g_dhcp_leases = Array('b', 1024 * 1024 * [0]) if "Window" in platform.system() else None
@@ -35,7 +35,8 @@ class DHCPD(Process):
         and http://www.pix.net/software/pxeboot/archive/pxespec.pdf.
     '''
     def __init__(self, **server_settings):
-        super(DHCPD, self).__init__(name='dhcp_server')
+        Process.__init__(self, name='dhcp_server')
+
         self.ip = server_settings.get('ip', '192.168.2.2')
         self.port = int(server_settings.get('port', 67))
         self.offer_from = server_settings.get('offer_from', '192.168.2.100')
@@ -83,21 +84,11 @@ class DHCPD(Process):
         self.buffer_position = 0
 
     def before_listen(self):
+
         # setup logger
-
         self.logger = logging.getLogger('DHCP')
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind(('', self.port))
-        if "Windows" in platform.system():
-            self.sock.settimeout(1)
-
-        if self.log_file is None:
-            handler = logging.StreamHandler()
-        else:
-            handler = logging.FileHandler(self.log_file)
-        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s \t %(message)s')
+        handler = logging.StreamHandler() if self.log_file is None else logging.FileHandler(self.log_file)
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s\t%(message)s')
         handler.setFormatter(formatter)
         self.logger.addHandler(handler)
 
@@ -116,26 +107,33 @@ class DHCPD(Process):
             self.file_name = 'tftp://{0}/{1}'.format(self.file_server, self.file_name)
 
         self.logger.debug('NOTICE: DHCP server started in debug mode. DHCP server is using the following:')
-        self.logger.info('DHCP Server IP: {0}'.format(self.ip))
-        self.logger.info('DHCP Server Port: {0}'.format(self.port))
+        self.logger.debug('DHCP Server IP: {0}'.format(self.ip))
+        self.logger.debug('DHCP Server Port: {0}'.format(self.port))
+
+        # setup socket
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        self.sock.bind((self.ip, self.port))
+        self.sock.settimeout(1) if helpers.SysWindow == helpers.get_sys_type() else None
 
         # debug info for ProxyDHCP mode
         if not self.mode_proxy:
-            self.logger.info('Lease Range: {0} - {1}'.format(self.offer_from, self.offer_to))
-            self.logger.info('Subnet Mask: {0}'.format(self.subnet_mask))
-            self.logger.info('Router: {0}'.format(self.router))
-            self.logger.info('DNS Server: {0}'.format(self.dns_server))
-            self.logger.info('Broadcast Address: {0}'.format(self.broadcast))
+            self.logger.debug('Lease Range: {0} - {1}'.format(self.offer_from, self.offer_to))
+            self.logger.debug('Subnet Mask: {0}'.format(self.subnet_mask))
+            self.logger.debug('Router: {0}'.format(self.router))
+            self.logger.debug('DNS Server: {0}'.format(self.dns_server))
+            self.logger.debug('Broadcast Address: {0}'.format(self.broadcast))
 
         if self.static_config:
-            self.logger.info('Using Static Leasing')
-            self.logger.info('Using Static Leasing Whitelist: {0}'.format(self.whitelist))
+            self.logger.debug('Using Static Leasing')
+            self.logger.debug('Using Static Leasing Whitelist: {0}'.format(self.whitelist))
 
-        self.logger.info('File Server IP: {0}'.format(self.file_server))
-        self.logger.info('File Name: {0}'.format(self.file_name))
-        self.logger.info('ProxyDHCP Mode: {0}'.format(self.mode_proxy))
-        self.logger.info('Using iPXE: {0}'.format(self.ipxe))
-        self.logger.info('Using HTTP Server: {0}'.format(self.http))
+        self.logger.debug('File Server IP: {0}'.format(self.file_server))
+        self.logger.debug('File Name: {0}'.format(self.file_name))
+        self.logger.debug('ProxyDHCP Mode: {0}'.format(self.mode_proxy))
+        self.logger.debug('Using iPXE: {0}'.format(self.ipxe))
+        self.logger.debug('Using HTTP Server: {0}'.format(self.http))
 
         # key is MAC
         # separate options dict so we don't have to clean up on export
@@ -159,13 +157,13 @@ class DHCPD(Process):
                 pass
 
     def export_leases(self, signum=None, frame=None):
-        if self.save_leases_file:
+        if self.save_leases_file and len(self.leases):
             export_safe = dict()
             for lease in self.leases:
                 # translate the key to json safe (and human readable) mac
                 export_safe[self.get_mac(lease)] = self.leases[lease]
             leases_file = open(self.save_leases_file, 'wb')
-            json.dump(export_safe, leases_file)
+            json.dump(export_safe, leases_file) if len(export_safe) else None
             self.logger.info('Exported leases to {0}'.format(self.save_leases_file))
         # if keyboard interrupt, propagate upwards
         if signum is not None:

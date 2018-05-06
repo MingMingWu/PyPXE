@@ -1,3 +1,4 @@
+# encoding: utf-8
 '''
 
 This file contains classes and functions that implement the PyPXE TFTP service
@@ -11,7 +12,10 @@ import select
 import time
 import logging
 import math
-from pypxe import helpers
+import helpers
+import sys
+
+from multiprocessing import Process
 
 class ParentSocket(socket.socket):
     '''Subclassed socket.socket to enable a link-back to the client object.'''
@@ -217,6 +221,8 @@ class Client:
             # write request
             self.sock = ParentSocket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # 0端口是系统保留端口，不用与TCP/IP或者UDP传输，绑定这个端口时系统会动态分配一个可用的端口进行绑定，
+            # 这样时避免写死端口的硬编码
             self.sock.bind((self.ip, 0))
             # used by select() to find ready clients
             self.sock.parent = self
@@ -224,31 +230,34 @@ class Client:
             self.send_error(4, 'Write support not implemented')
             self.dead = True
 
-class TFTPD:
+class TFTPD(Process):
     '''
         This class implements a read-only TFTP server
         implemented from RFC1350 and RFC2348
     '''
     def __init__(self, **server_settings):
+        Process.__init__(self, name='tftp_server')
+
         self.ip = server_settings.get('ip', '0.0.0.0')
         self.port = int(server_settings.get('port', 69))
         self.netboot_directory = server_settings.get('netboot_directory', '.')
         self.mode_verbose = server_settings.get('mode_verbose', False) # verbose mode
         self.mode_debug = server_settings.get('mode_debug', False) # debug mode
-        self.logger = server_settings.get('logger', None)
+        self.log_file = server_settings.get('log_file', None)
         self.default_retries = server_settings.get('default_retries', 3)
         self.timeout = server_settings.get('timeout', 5)
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind((self.ip, self.port))
+        self.logger = logging.getLogger()
+        self.ongoing = []
+        self.exit_flag = server_settings.get('win_exit_flag', None)
+
+    def before_listen(self):
 
         # setup logger
-        if self.logger == None:
-            self.logger = logging.getLogger('TFTP')
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+        self.logger = logging.getLogger('TFTP')
+        handler = logging.StreamHandler() if self.log_file is None else logging.FileHandler(self.log_file)
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s\t%(message)s')
+        handler.setFormatter(formatter)
+        self.logger.addHandler(handler)
 
         if self.mode_debug:
             self.logger.setLevel(logging.DEBUG)
@@ -257,27 +266,43 @@ class TFTPD:
         else:
             self.logger.setLevel(logging.WARN)
 
+        # socket
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((self.ip, self.port))
+
         self.logger.debug('NOTICE: TFTP server started in debug mode. TFTP server is using the following:')
         self.logger.debug('Server IP: {0}'.format(self.ip))
         self.logger.debug('Server Port: {0}'.format(self.port))
         self.logger.debug('Network Boot Directory: {0}'.format(self.netboot_directory))
 
-        self.ongoing = []
 
     def listen(self):
         '''This method listens for incoming requests.'''
+
+        # remove complete clients to select doesn't fail
+        map(self.ongoing.remove, [client for client in self.ongoing if client.dead])
+
+        # TODO: 根据系统选择select和epoll
+        rlist, _, _ = select.select([self.sock] + [client.sock for client in self.ongoing if not client.dead], [], [], 1)
+        for sock in rlist:
+            if sock == self.sock:
+                # main socket, so new client
+                self.ongoing.append(Client(sock, self))
+            else:
+                # client socket, so tell the client object it's ready
+                sock.parent.ready()
+        # if we haven't recieved an ACK in timeout time, retry
+        [client.send_block() for client in self.ongoing if client.no_ack()]
+        # if we have run out of retries, kill the client
+        [client.complete() for client in self.ongoing if client.no_retries()]
+
+    def run(self):
+        self.before_listen()
+
         while True:
-            # remove complete clients to select doesn't fail
-            map(self.ongoing.remove, [client for client in self.ongoing if client.dead])
-            rlist, _, _ = select.select([self.sock] + [client.sock for client in self.ongoing if not client.dead], [], [], 1)
-            for sock in rlist:
-                if sock == self.sock:
-                    # main socket, so new client
-                    self.ongoing.append(Client(sock, self))
-                else:
-                    # client socket, so tell the client object it's ready
-                    sock.parent.ready()
-            # if we haven't recieved an ACK in timeout time, retry
-            [client.send_block() for client in self.ongoing if client.no_ack()]
-            # if we have run out of retries, kill the client
-            [client.complete() for client in self.ongoing if client.no_retries()]
+            self.listen()
+
+            if self.exit_flag:
+                if self.exit_flag.value:
+                    sys.exit()

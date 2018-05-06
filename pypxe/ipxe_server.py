@@ -4,22 +4,29 @@
 
 # import http
 import dhcp
-# import tftp
+import tftp
 # import nbd
 
 import logging
 import logging.handlers
 import traceback
-# import helpers
+import helpers
 import os
 from time import sleep
 # from dhcp import g_dhcp_leases, g_win_exit_flag_dhcp
 import platform
 from multiprocessing import Process, Value, Array
 
+# for remote debug
+if helpers.SysLinux == helpers.get_sys_type():
+    import pydevd
+    pydevd.settrace('192.168.56.120', port=10001, stderrToServer=True, stdoutToServer=True)
+
+g_win_exit_flag_tftp = Value('B', False) if helpers.SysWindow == helpers.get_sys_type() else None
+g_win_exit_flag_dhcp = Value('B', False) if helpers.SysWindow == helpers.get_sys_type() else None
+g_win_exit_flag_http = Value('B', False) if helpers.SysWindow == helpers.get_sys_type() else None
 
 g_dhcp_leases = Array('c', 1024 * 1024 * ['\n']) if "Window" in platform.system() else None
-g_win_exit_flag_dhcp = Value('B', False) if "Window" in platform.system() else None
 
 
 def read_leases():
@@ -54,17 +61,21 @@ class IPXEServer(object):
 
     def __init__(self, **server_cfg):
 
+        global g_win_exit_flag_tftp
+        global g_win_exit_flag_dhcp
+        global g_win_exit_flag_http
+
         self.servers = []
         # get cfg
         self.sys_cfg = server_cfg.get("sys_cfg", None)
-        self.tftp_cfg = server_cfg.get("tft_cfg", None)
+        self.tftp_cfg = server_cfg.get("tftp_cfg", None)
         self.dhcp_cfg = server_cfg.get("dhcp_cfg", None)
         self.http_cfg = server_cfg.get("http_cfg", None)
 
         # system cfg
         if self.sys_cfg:
             self.syslog_name = self.sys_cfg.get("syslog_file", None)
-            self.tftp_enable = self.sys_cfg.get("tft_enable", False)
+            self.tftp_enable = self.sys_cfg.get("tftp_enable", False)
             self.dhcp_enable = self.sys_cfg.get("dhcp_enable", False)
             self.http_enable = self.sys_cfg.get("http_enable", False)
 
@@ -88,41 +99,33 @@ class IPXEServer(object):
                 self.sys_logger.setLevel(logging.WARN)
 
             # log info
-            self.sys_logger.debug("PyPXE system config confirmed")
-            self.sys_logger.debug("system log: {}".format("StreamHandler" if self.syslog_name is None else self.syslog_name))
-            self.sys_logger.debug("system debug mode: {}".format(do_debug_verbose(self.sys_cfg.get('mode_debug'),
+            self.sys_logger.info("PyPXE system config confirmed")
+            self.sys_logger.info("system log: {}".format("StreamHandler" if self.syslog_name is None else self.syslog_name))
+            self.sys_logger.info("system debug mode: {}".format(do_debug_verbose(self.sys_cfg.get('mode_debug'),
                                                                                  'pypxe')))
-            self.sys_logger.debug("system verbose mode: {}".format(do_debug_verbose(self.sys_cfg.get('mode_verbose'),
+            self.sys_logger.info("system verbose mode: {}".format(do_debug_verbose(self.sys_cfg.get('mode_verbose'),
                                                                                    'pypxe')))
-            self.sys_logger.debug("tftp server enable: {}".format(self.tftp_enable))
-            self.sys_logger.debug("dhcp server enable: {}".format(self.dhcp_enable))
-            self.sys_logger.debug("http server enable: {}".format(self.http_enable))
+            self.sys_logger.info("tftp server enable: {}".format(self.tftp_enable))
+            self.sys_logger.info("dhcp server enable: {}".format(self.dhcp_enable))
+            self.sys_logger.info("http server enable: {}".format(self.http_enable))
 
         else:
             self.sys_logger = None
 
         # tftp cfg
-        # if self.sys_cfg.get("tftp_enable", False) and server_cfg.get("tftp_cfg", False):
-        #     try:
-        #         self.tftp_logger = helpers.get_child_logger(self.sys_logger, "tftp_log")
-        #         self.tftp_cfg = server_cfg.get("tftp_cfg", None)
-        #         self.tftp_cfg["logger"] = self.tftp_logger
-        #         self.tftp_cfg["mode_debug"] = self.sys_cfg.get("debug", False)
-        #         self.tftp_cfg["mode_verbose"] = self.sys_cfg.get("verbose", False)
-        #         self.tftp_server = tftp.TFTPD(
-        #             ip=self.tftp_cfg.get("ip", "12.34.56.78"),
-        #             port=self.tftp_cfg.get("port", 69),
-        #             netboot_directory=self.tftp_cfg.get("netboot_directory", "~"),
-        #             mode_debug=self.sys_cfg.get("mode_debug", False),
-        #             mode_verbose=self.sys_cfg.get("mode_verbose", False),
-        #             logger=self.tftp_logger)
-        #         self.tftp_process = Process(target=self.tftp_server)
-        #         self.tftp_process.daemon = True
-        #         self.tftp_process.start()
-        #         self.servers.append(self.tftp_server)
-        #     except:
-        #         self.tft_server = None
-        #         traceback.print_exc()
+        if self.sys_cfg.get("tftp_enable", False) and server_cfg.get("tftp_cfg", False):
+            try:
+                self.tftp_server = tftp.TFTPD(ip=self.tftp_cfg.get("ip", "192.168.56.120"),
+                                              port=self.tftp_cfg.get("port", 69),
+                                              netboot_directory=self.tftp_cfg.get("netboot_dir", "~"),
+                                              mode_debug=do_debug_verbose(self.sys_cfg.get('mode_debug'), 'tftp'),
+                                              mode_verbose=do_debug_verbose(self.sys_cfg.get('mode_verbose'), 'tftp'),
+                                              logger=self.tftp_cfg.get("log_file", None),
+                                              win_exit_flag=g_win_exit_flag_tftp)
+                self.servers.append(self.tftp_server)
+            except:
+                self.tftp_server = None
+                traceback.print_exc()
 
         # dhcp cfg
 
@@ -155,6 +158,7 @@ class IPXEServer(object):
             except :
                 traceback.print_exc()
 
+        # http
         # if self.sys_cfg.get("http_enable", False) and server_cfg.get("http_cfg", None):
         #     try:
         #         self.http_logger = helpers.get_child_logger(self.sys_logger, "http_log")
@@ -174,18 +178,29 @@ class IPXEServer(object):
         for server in self.servers:
             server.start()
 
+        sleep(0.5)
+
+        for server in self.servers:
+            self.sys_logger.info("{0} start {1}".format(server.name, "Success" if server.is_alive() else "Fail"))
+
     def stop(self):
         import platform
-        if "Windows" in platform.system():
+        if helpers.SysWindow == helpers.get_sys_type():
             # windows
             for server in self.servers:
-                #signal包主要是针对UNIX平台(比如Linux, MAC
-                # OS)，而Windows内核中由于对信号机制的支持不充分，所以在Windows上的Python不能发挥信号系统的功能。
-                # os.popen("taskkill /pid {}".format(server.pid))
-                global g_win_exit_flag_dhcp
-                g_win_exit_flag_dhcp.value = True
 
-        elif "Linux" in platform.system():
+                # signal包主要是针对UNIX平台(比如Linux, MAC
+                # OS)，而Windows内核中由于对信号机制的支持不充分，所以在Windows上的Python不能发挥信号系统的功能。在windows上
+                # terminate()不发送信号直接退出进程。这里使用共享内存设置标记，进程在循环时检查标记，保存数据后自己退出
+                # os.popen("taskkill /pid {}".format(server.pid))
+                global g_win_exit_flag_tftp
+                global g_win_exit_flag_dhcp
+                global g_win_exit_flag_http
+                g_win_exit_flag_tftp.value = True
+                g_win_exit_flag_dhcp.value = True
+                g_win_exit_flag_http.value = True
+
+        elif helpers.SysLinux == helpers.get_sys_type():
             for server in self.servers:
                 server.terminate()
                 sleep(0.5)
@@ -193,9 +208,9 @@ class IPXEServer(object):
         else:
             for server in self.servers:
                 server.terminate()
-                server.jion()
+                # server.jion()
 
-        sleep(2)
+        sleep(0.5)
 
         for server in self.servers:
             self.sys_logger.info("{0} stop {1}".format(server.name, "Success" if not server.is_alive() else "Fail"))
@@ -207,33 +222,36 @@ class IPXEServer(object):
     def read_leases(self):
         print "test"
 
-#获取网卡名称和其ip地址，不包括回环
-# TODO: 网卡名称转换问题
-def get_netcard():
-    import psutil
-    netcard_info = []
-    info = psutil.net_if_addrs()
-    for k,v in info.items():
-        for item in v:
-            if item[0] == 2 and not item[1]=='127.0.0.1':
-                netcard_info.append((k,item[1]))
-    return netcard_info
+
 # test
 if __name__ == "__main__":
 
-    print get_netcard()
-
+    # print helpers.get_netcard()
+    if helpers.SysWindow == helpers.get_sys_type():
+        local_ip = '192.168.56.120'
+        offer_from = "192.168.56.150"
+        offer_to = "192.168.56.200"
+        router = "192.168.56.1"
+        broadcast = "192.168.56.255"
+        file_server = "192.168.56.120"
+    elif helpers.SysLinux == helpers.get_sys_type():
+        local_ip = "12.34.56.78"
+        offer_from = "12.34.56.100"
+        offer_to = "12.34.56.200"
+        router = "12.34.56.1"
+        broadcast = "12.34.56.255"
+        file_server = "12.34.56.78"
     ipx_cfg = {
         "sys_cfg": {
             # log
             # "syslog_file": "ipxe.log",
 
             # debug
-            "mode_debug": "",
-            "mode_verbose": "all",
+            "mode_debug": "all",
+            "mode_verbose": "",
 
             # server enable
-            "tftp_enable": False,
+            "tftp_enable": True,
             "dhcp_enable": True,
             "http_enable": False,
             "nbd_enable": False,
@@ -242,22 +260,22 @@ if __name__ == "__main__":
         },
 
         "tftp_cfg": {
-            "ip": "12.34.56.78",
+            "ip": local_ip,
             # "port": 69,   # should use default
-            "netboot_dir": "~"
+            "netboot_dir": "E:\code\PyPXE\\netboot"
 
         },
 
         "dhcp_cfg": {
-            "ip": "192.168.56.120",
+            "ip": local_ip,
             # "port": 67,
-            "offer_from": "192.168.56.150",
-            "offer_to": "192.168.56.200",
+            "offer_from": offer_from,
+            "offer_to": offer_to,
             "subnet_mask": "255.255.255.0",
             "router": "192.168.56.1",
-            "broadcast": "192.168.56.255",
-            "dns_server": "8.8.8.8",
-            "file_server": "192.168.56.120",
+            "broadcast": broadcast,
+            "dns_server": router,
+            "file_server": file_server,
             "file_option_name":{
                 "pxe": "undionly.kpxe",
                 "ipxe": "pxelinux.0",
@@ -279,10 +297,11 @@ if __name__ == "__main__":
     import signal
     ipxe_server = IPXEServer(**ipx_cfg)
     ipxe_server.start()
-    sleep(20)
-    ipxe_server.stop()
-    print read_leases()
-
+    # sleep(20)
+    # ipxe_server.stop()
+    # read_leases()
+    while True:
+        pass
 
 
 
