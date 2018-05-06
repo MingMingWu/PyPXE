@@ -12,21 +12,22 @@ import logging.handlers
 import traceback
 import helpers
 import os
+import signal
+import sys
+
 from time import sleep
-# from dhcp import g_dhcp_leases, g_win_exit_flag_dhcp
-import platform
 from multiprocessing import Process, Value, Array
 
 # for remote debug
-if helpers.SysLinux == helpers.get_sys_type():
-    import pydevd
-    pydevd.settrace('192.168.56.120', port=10001, stderrToServer=True, stdoutToServer=True)
+# if helpers.SysLinux == helpers.get_sys_type():
+#     import pydevd
+#     pydevd.settrace('192.168.56.120', port=10001, stderrToServer=True, stdoutToServer=True)
 
 g_win_exit_flag_tftp = Value('B', False) if helpers.SysWindow == helpers.get_sys_type() else None
 g_win_exit_flag_dhcp = Value('B', False) if helpers.SysWindow == helpers.get_sys_type() else None
 g_win_exit_flag_http = Value('B', False) if helpers.SysWindow == helpers.get_sys_type() else None
 
-g_dhcp_leases = Array('c', 1024 * 1024 * ['\n']) if "Window" in platform.system() else None
+g_dhcp_leases = Array('c', 1024 * 1024 * ['\n']) if helpers.SysWindow == helpers.get_sys_type() else None
 
 
 def read_leases():
@@ -46,15 +47,6 @@ def do_debug_verbose(cfg, service):
     return ((service.lower() in cfg.lower()
             or 'all' in cfg.lower())
             and '-{0}'.format(service.lower()) not in cfg.lower())
-
-
-def get_sys_type():
-    if "Windows" in platform.system():
-        return "windows"
-    elif "Linux" in platform.system():
-        return "linux"
-    else:
-        return "other"
 
 
 class IPXEServer(object):
@@ -174,6 +166,8 @@ class IPXEServer(object):
         # nbd
         # signal.signal(signal.SIGCHLD, self.read_leases)
 
+        signal.signal(signal.SIGINT, self.stop)
+
     def start(self):
         for server in self.servers:
             server.start()
@@ -183,7 +177,7 @@ class IPXEServer(object):
         for server in self.servers:
             self.sys_logger.info("{0} start {1}".format(server.name, "Success" if server.is_alive() else "Fail"))
 
-    def stop(self):
+    def stop(self, signum=None, frame=None):
         import platform
         if helpers.SysWindow == helpers.get_sys_type():
             # windows
@@ -215,6 +209,9 @@ class IPXEServer(object):
         for server in self.servers:
             self.sys_logger.info("{0} stop {1}".format(server.name, "Success" if not server.is_alive() else "Fail"))
 
+        if signum == signal.SIGTERM:
+            sys.exit()
+
     def get_dhcp_lease(self):
         if self.dhcp_server:
             pass
@@ -234,13 +231,18 @@ if __name__ == "__main__":
         router = "192.168.56.1"
         broadcast = "192.168.56.255"
         file_server = "192.168.56.120"
-    elif helpers.SysLinux == helpers.get_sys_type():
+        netboot_dir = r"E:\code\PyPXE\netboot"
+
+    # elif helpers.SysLinux == helpers.get_sys_type():
+    else:
         local_ip = "12.34.56.78"
         offer_from = "12.34.56.100"
         offer_to = "12.34.56.200"
         router = "12.34.56.1"
         broadcast = "12.34.56.255"
         file_server = "12.34.56.78"
+        netboot_dir = r"~/netboot"
+
     ipx_cfg = {
         "sys_cfg": {
             # log
@@ -262,7 +264,7 @@ if __name__ == "__main__":
         "tftp_cfg": {
             "ip": local_ip,
             # "port": 69,   # should use default
-            "netboot_dir": "E:\code\PyPXE\\netboot"
+            "netboot_dir": netboot_dir,
 
         },
 
@@ -274,9 +276,9 @@ if __name__ == "__main__":
             "subnet_mask": "255.255.255.0",
             "router": "192.168.56.1",
             "broadcast": broadcast,
-            "dns_server": router,
+            # "dns_server": '8.8.8.8',
             "file_server": file_server,
-            "file_option_name":{
+            "file_option_name": {
                 "pxe": "undionly.kpxe",
                 "ipxe": "pxelinux.0",
             },
@@ -294,9 +296,10 @@ if __name__ == "__main__":
         },
     }
 
-    import signal
     ipxe_server = IPXEServer(**ipx_cfg)
     ipxe_server.start()
+
+    signal.signal(signal.SIGINT, ipxe_server.stop)
     # sleep(20)
     # ipxe_server.stop()
     # read_leases()

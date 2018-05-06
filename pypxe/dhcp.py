@@ -27,6 +27,7 @@ class OutOfLeasesError(Exception):
 def default_dict():
     return {'ip': '', 'expire': 0, 'ipxe': False}
 
+
 class DHCPD(Process):
     '''
         This class implements a DHCP Server, limited to PXE options.
@@ -113,8 +114,11 @@ class DHCPD(Process):
         # setup socket
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # socket.SO_BROADCAST 设置sock具有广播特性，下面绑定的时候不用指定具体网卡ip（指定ip时反而收不到），报文会从所有的网卡广播出去
+        # 配置的ip会插入到报文中
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        self.sock.bind((self.ip, self.port))
+        return_code = self.sock.bind(('', self.port))
+        self.logger.info("Bind return code: {}".format(return_code))
         self.sock.settimeout(1) if helpers.SysWindow == helpers.get_sys_type() else None
 
         # debug info for ProxyDHCP mode
