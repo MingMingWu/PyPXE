@@ -132,10 +132,11 @@ class IPXEServer(object):
                                               dns_server=self.dhcp_cfg.get("dns_server", "8.8.8.8"),
                                               broadcast=self.dhcp_cfg.get("broadcast", "192.168.56.255"),
                                               file_server=self.dhcp_cfg.get("file_server", "192.168.56.120"),
-                                              file_name=self.dhcp_cfg.get("file_name", "undionly.kpxe"),
-                                              file_option_name=self.dhcp_cfg.get("file_option_name",
-                                                                                 {"pxe": "undionly.kpxe",
-                                                                                  "ipxe": "ipxelinux.0"}),
+                                              file_name=self.dhcp_cfg.get("file_name", None),
+                                              file_option=self.dhcp_cfg.get("file_option",
+                                                                                 {"option": 77,
+                                                                                  "file_name":{"iPXE": "pxelinux.cfg"},
+                                                                                  "default_file": "undionly.kpxe"}),
                                               use_ipxe=False,
                                               use_http=False,
                                               mode_proxy=self.dhcp_cfg.get("mode_proxy", False),
@@ -250,7 +251,7 @@ if __name__ == "__main__":
 
             # debug
             "mode_debug": "all",
-            "mode_verbose": "",
+            "mode_verbose": "all",
 
             # server enable
             "tftp_enable": True,
@@ -278,10 +279,9 @@ if __name__ == "__main__":
             "broadcast": broadcast,
             # "dns_server": '8.8.8.8',
             "file_server": file_server,
-            "file_option_name": {
-                "pxe": "undionly.kpxe",
-                "ipxe": "pxelinux.0",
-            },
+            "file_option": {"option": 77,
+                            "file_name": {"iPXE": "pxelinux.cfg"},
+                            "default_file:": "undionly.kpxe"},
             "proxy": False,
 
             # "log_file": "dhcp.log",

@@ -9,7 +9,7 @@ import struct
 import os
 import threading
 import logging
-from pypxe import helpers
+import helpers
 
 class HTTPD:
     '''

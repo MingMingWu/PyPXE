@@ -25,7 +25,7 @@ class OutOfLeasesError(Exception):
 
 
 def default_dict():
-    return {'ip': '', 'expire': 0, 'ipxe': False}
+    return {'ip': '', 'expire': 0, 'ipxe': True}
 
 
 class DHCPD(Process):
@@ -56,14 +56,11 @@ class DHCPD(Process):
             self.broadcast = derived_broadcast
 
         self.file_server = server_settings.get('file_server', '192.168.2.2')
-        self.file_name = server_settings.get('file_name', '')
-        self.file_option_name = server_settings.get("file_option_name", {"pxe": "undionly.kpxe",
-                                                                         "ipxe": "ipxelinux.0"})
-        if not self.file_name:
-            self.force_file_name = False
-            self.file_name = 'pxelinux.0'
-        else:
-            self.force_file_name = True
+        self.file_option = server_settings.get("file_option",
+                                                    {"option": 77,
+                                                     "file_name": {"iPXE": "pxelinux.cfg"},
+                                                     "default_file": "undionly.kpxe"})
+        self.file_name = self.file_option.get("default_file", "undionly.kpxe")
         self.ipxe = server_settings.get('use_ipxe', False)
         self.http = server_settings.get('use_http', False)
         self.mode_proxy = server_settings.get('mode_proxy', False)  # ProxyDHCP mode
@@ -186,6 +183,7 @@ class DHCPD(Process):
         statics = self.static_config
         for child in path.split('.'):
             statics = statics.get(child, {})
+        self.logger.debug("get_namespaced_static: {0}".format(statics if statics else fallback))
         return statics if statics else fallback
 
     def next_ip(self):
@@ -315,25 +313,32 @@ class DHCPD(Process):
 
         # file_name null terminated
         filename = self.get_namespaced_static('dhcp.binding.{0}.rom'.format(self.get_mac(client_mac)))
+        file_opt = self.file_option.get("option", None)
         if not filename:
-            # TODO: 支持文件可通过接口配置
-            if not self.ipxe or not self.leases[client_mac]['ipxe']:
-                # http://www.syslinux.org/wiki/index.php/PXELINUX#UEFI
-                if 'options' in self.leases[client_mac] and 93 in self.leases[client_mac]['options'] and not self.force_file_name:
-                    [arch] = struct.unpack("!H", self.leases[client_mac]['options'][93][0])
-                    filename = {0: 'pxelinux.0', # BIOS/default
-                                6: 'syslinux.efi32', # EFI IA32
-                                7: 'syslinux.efi64', # EFI BC, x86-64
-                                9: 'syslinux.efi64'  # EFI x86-64
-                                }[arch]
-                else:
+            if file_opt and file_opt in self.options[client_mac]:
+                def get_filename_opt77(file_option, options):
+                    for opt in file_option:
+                        if opt in options[0]:
+                            return file_option[opt]
+                    return file_option["default_file"]
+
+                def get_filename_opt93(file_option, options):
+                    return {0: 'pxelinux.0', # BIOS/default
+                            6: 'syslinux.efi32', # EFI IA32
+                            7: 'syslinux.efi64', # EFI BC, x86-64
+                            9: 'syslinux.efi64'  # EFI x86-64
+                            }[options[93][0]]
+                try:
+                    filename = {77: get_filename_opt77,
+                                93: get_filename_opt93}[file_opt](self.file_option['file_name'],
+                                                                  self.options[client_mac][file_opt])
+                except :
+                    self.logger.error("File option error, use default file")
                     filename = self.file_name
             else:
-                filename = 'chainload.kpxe' # chainload iPXE
-                if opt53 == 5: # ACK
-                    self.leases[client_mac]['ipxe'] = False
+                filename = self.file_name
         response += self.tlv_encode(67, filename.encode('ascii') + chr(0))
-
+        self.logger.info("Filename: {0}".format(filename))
         if self.mode_proxy:
             response += self.tlv_encode(60, 'PXEClient')
             response += struct.pack('!BBBBBBB4sB', 43, 10, 6, 1, 0b1000, 10, 4, chr(0) + 'PXE', 0xff)
